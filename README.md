@@ -16,6 +16,8 @@ The `/spark-tune` skill extracts query plans, stage metrics, and task-level stat
 
 - **Databricks CLI** configured with a workspace profile (`~/.databrickscfg`)
 - **curl** and **jq** available on PATH
+- **python3** for event log QPL parsing (zero external dependencies)
+- **uv** (optional) for HTML-based QPL parsing (uses beautifulsoup4)
 - A personal access token with View, Attach, and Manage permissions (see [CONNECTORS.md](CONNECTORS.md))
 
 ## Getting Started
@@ -53,12 +55,16 @@ spark-tuning/
 ├── README.md                    This file
 ├── CONNECTORS.md                API authentication and endpoints
 └── skills/spark-tune/
-    ├── SKILL.md                 Skill definition (893 lines)
+    ├── SKILL.md                 Skill definition
     ├── test_inputs.py           Input validation test suite
+    ├── scripts/
+    │   ├── parse_eventlog.py    Event log → structured QPL JSON (zero deps)
+    │   └── parse_qpl.py         Spark UI HTML → structured QPL JSON
     └── references/
         ├── anti-patterns.md     Spark anti-pattern detection reference
         ├── databricks-optimizations.md  Databricks-specific tuning checklist
-        └── report-template.md   Output report template
+        ├── report-template.md   Output report template
+        └── spark-metrics-reference.md   Operator-level metric catalog
 ```
 
 ## License

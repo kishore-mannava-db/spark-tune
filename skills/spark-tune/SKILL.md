@@ -109,6 +109,20 @@ def parse_inputs(args: str) -> dict:
 
 ---
 
+## Ground Truth Rules
+
+When analyzing parsed QPL data or reporting metrics, follow these rules strictly:
+
+1. **Read before citing** — never reference a metric, operator name, or row count without first reading it from the parsed JSON or plan output.
+2. **No invented metrics** — if a field is missing or null, say "not available." Do not estimate or interpolate.
+3. **Event-log has no edge row counts** — `edge_rows_to_parent` is only present in HTML-parsed QPLs. Never cite row flow between operators from event-log data.
+4. **Distinguish metric names** — `shuffle bytes written` ≠ `data size`; `rows output` ≠ `written output rows`. Use exact field names.
+5. **No extrapolation** — do not project what "would happen" with different data sizes. Report what was observed.
+6. **Verify structural claims** — before saying "operator X feeds into Y," confirm the parent-child relationship in the parsed topology.
+7. **Quote numbers exactly** — use the precision from the source (e.g., `5.6 s`, not "about 6 seconds").
+
+---
+
 ## Workflow
 
 ### 1. Resolve Inputs and Locate Logs
@@ -190,7 +204,64 @@ LOGDIR=$(dirname "<event_log_path>")
 
 **After this step, you should have:** `LOGDIR` containing `eventlog`, `stdout`, and `stderr` files, plus `CLUSTER_ID`, `EXEC_DURATION`, and `SETUP_DURATION` metadata.
 
-### 2. Extract All Execution Plans
+### 2. Parse QPL (Query Plan Lineage) from Event Logs or HTML
+
+Before analyzing plans manually, run the QPL parser scripts to extract structured operator-level metrics into JSON. This gives precise per-operator metrics (duration, spill, shuffle, rows) that the manual event-log grep cannot provide.
+
+#### 2a. From Event Logs (zero dependencies)
+
+```bash
+# Parse all SQL executions from the event log
+python3 skills/spark-tune/scripts/parse_eventlog.py "$LOGDIR/eventlog" --all
+
+# Or parse specific execution IDs
+python3 skills/spark-tune/scripts/parse_eventlog.py "$LOGDIR/eventlog" --query 0 --query 1
+```
+
+**Output:** `parsed_output/{QueryName}/query_plan.json` per execution, containing:
+- `operators[]` — each with inline `metrics[]` array, `children`, `edge_rows_to_parent`
+- `stages[]` — stage-level timing and accumulator metrics
+- `execution_summary` — total duration, row counts
+- `sql_properties` — Spark SQL config active during execution
+- `command_metrics` — MERGE/DELETE/INSERT-specific counters
+- `scan_metrics` — per-table scan stats with table paths
+
+#### 2b. From Spark UI HTML (requires beautifulsoup4)
+
+```bash
+# Parse Spark UI HTML page (requires uv or pip install beautifulsoup4)
+uv run skills/spark-tune/scripts/parse_qpl.py /path/to/spark-ui-page.html
+
+# Or a directory of HTML files
+uv run skills/spark-tune/scripts/parse_qpl.py /path/to/html-dir/
+```
+
+**Output:** Same JSON structure as event-log parser. HTML-parsed QPLs additionally include `edge_rows_to_parent` (row counts flowing between operators) and `io_cache` statistics.
+
+#### 2c. Interpreting Parsed QPL JSON
+
+Use the operator metrics to drive analysis in Steps 3–5. Key fields per operator:
+
+```json
+{
+  "node_id": 5,
+  "node_name": "PhotonShuffledHashJoin",
+  "metrics": [
+    {"name": "rows output", "value": "1,234,567"},
+    {"name": "build data size", "value": "45.2 MiB"},
+    {"name": "spill size total", "value": "0 B"},
+    {"name": "duration total", "value": "3.2 s (120 ms, 400 ms, 890 ms)"}
+  ],
+  "children": [3, 4],
+  "edge_rows_to_parent": 1234567
+}
+```
+
+**Metric format:** `total (min, med, max)` — when `max >> med` (e.g., 10x), suspect **data skew** or a **straggler task**. See `references/spark-metrics-reference.md` for the full metric catalog.
+
+### 3. Extract All Execution Plans (Fallback)
+
+> **Note:** If Step 2 produced parsed QPL JSON, the plans are already extracted. Use this step only when the QPL parsers are not available or when you need raw plan text for additional context.
 
 For every SQL execution / DataFrame action found in the log, capture **all four plan phases**:
 
@@ -276,11 +347,18 @@ def parse_event_log(log_path):
     return {"jobs": jobs, "stages": stages, "sql_executions": sql_executions, "tasks": tasks}
 ```
 
-### 3. Analyze Plans for Anti-Patterns
+### 4. Analyze Plans for Anti-Patterns
 
-Scan every physical plan and stage metric for these **10 anti-patterns**, ordered by typical severity:
+Scan every physical plan, stage metric, and **parsed QPL operator metrics** (from Step 2) for these **10 anti-patterns**, ordered by typical severity.
 
-#### 3a. Critical Severity
+When QPL JSON is available, use operator-level metrics for precise detection:
+- **Spill**: check `spill size total` on every operator (any non-zero = memory pressure)
+- **Skew**: check `duration total` format — when `max >> med` (10x+), flag the operator
+- **Join fanout**: compare `rows output` at join vs. sum of input `edge_rows_to_parent`
+- **Shuffle cost**: check `data size total` and `fetch wait time total` on Exchange operators
+- **Scan inefficiency**: compare `size of files read total` vs. `rows output` for selectivity
+
+#### 4a. Critical Severity
 
 | # | Anti-Pattern | Detection Rule | Plan/Log Signal |
 |---|-------------|---------------|-----------------|
@@ -288,7 +366,7 @@ Scan every physical plan and stage metric for these **10 anti-patterns**, ordere
 | 2 | **Full Table Scan on Large Table** | `Scan` with no `PushedFilters` + `bytesRead > 1GB` | Missing partition pruning or predicate pushdown |
 | 3 | **Severe Data Skew** | Task duration max/median ratio > 5x | One task processes 10x+ more data than peers |
 
-#### 3b. High Severity
+#### 4b. High Severity
 
 | # | Anti-Pattern | Detection Rule | Plan/Log Signal |
 |---|-------------|---------------|-----------------|
@@ -296,7 +374,7 @@ Scan every physical plan and stage metric for these **10 anti-patterns**, ordere
 | 5 | **Wrong Join Strategy** | `SortMergeJoin` when one side < 1GB | Should be `BroadcastHashJoin`; missing AQE or hint |
 | 6 | **Excessive Shuffles** | More than 2 `Exchange` nodes in a single query plan | Redundant repartitions or groupBy chains |
 
-#### 3c. Medium Severity
+#### 4c. Medium Severity
 
 | # | Anti-Pattern | Detection Rule | Plan/Log Signal |
 |---|-------------|---------------|-----------------|
@@ -364,7 +442,7 @@ def detect_anti_patterns(physical_plan: str, stage_metrics: dict, task_metrics: 
     return sorted(findings, key=lambda x: {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2}.get(x[0], 3))
 ```
 
-### 4. Compute Tuning Metrics
+### 5. Compute Tuning Metrics
 
 For each job/stage, compute these summary metrics:
 
@@ -424,7 +502,7 @@ def compute_tuning_metrics(stages, tasks, spark_conf):
     return metrics
 ```
 
-### 5. Generate Spark Configuration Recommendations
+### 6. Generate Spark Configuration Recommendations
 
 Based on detected anti-patterns and computed metrics, generate specific config changes:
 
@@ -503,7 +581,7 @@ RECOMMENDATION_RULES = {
 }
 ```
 
-### 6. Generate the Performance Tuning Report
+### 7. Generate the Performance Tuning Report
 
 Assemble all findings into a structured Markdown document:
 
@@ -602,7 +680,7 @@ Assemble all findings into a structured Markdown document:
 4. [ ] Review Spark UI for validation
 ```
 
-### 7. Write Report to File
+### 8. Write Report to File
 
 Save the generated report as `<job-name>_tuning_report.md` in the working directory, or to a specified output path. If a Databricks catalog is specified, also persist metrics to a Delta table for historical tracking:
 
@@ -611,7 +689,7 @@ Save the generated report as `<job-name>_tuning_report.md` in the working direct
 tuning_df.write.mode("append").saveAsTable(f"{catalog}.{schema}.spark_tuning_history")
 ```
 
-### 8. Prompt: Apply Tuning Code Changes
+### 9. Prompt: Apply Tuning Code Changes
 
 After presenting the report, **ask the user**:
 
@@ -649,7 +727,7 @@ If the user selects fixes to apply:
 | Reduce shuffle partitions | Add `spark.conf.set("spark.sql.shuffle.partitions", N)` |
 | Enable missing configs | Add `spark.conf.set(key, value)` for each missing optimization |
 
-### 9. Prompt: Deploy and Re-Evaluate
+### 10. Prompt: Deploy and Re-Evaluate
 
 After applying code changes (or if the user skips Step 8 but wants config-only changes), **ask the user**:
 
@@ -715,6 +793,23 @@ If the user selects **yes**:
    ```
 
 8. **Persist comparison** to the tuning history Delta table if configured
+
+#### QPL-Level Comparison (when parsed JSON is available)
+
+When both the before and after runs have parsed QPL JSON (from Step 2), generate an operator-level diff:
+
+```
+### Operator-Level Changes
+
+| Operator | Metric | Before | After | Change |
+|----------|--------|--------|-------|--------|
+| PhotonShuffledHashJoin #5 | duration total | 3.2 s | 1.1 s | -65.6% |
+| Exchange #8 | data size total | 2.4 GiB | 945 MiB | -61.6% |
+| PhotonGroupingAgg #3 | spill size total | 512 MiB | 0 B | Eliminated |
+| PhotonScan #12 | rows output | 45M | 12M | -73.3% (DPP applied) |
+```
+
+**Evidence-based claims only:** cite the exact operator `node_id` and metric name from the parsed JSON. Do not attribute improvements to changes unless the metric diff confirms it.
 
 If the user selects **deploy-only**:
 - Execute steps 1-2 only
@@ -880,6 +975,19 @@ When running on Databricks, also evaluate:
 # Analyze latest run with all defaults
 /spark-tune --job-id 583122712958557
 ```
+
+---
+
+## Knowledge Base Navigation
+
+| Reference | Path | Purpose |
+|-----------|------|---------|
+| Anti-Patterns Catalog | `references/anti-patterns.md` | Detection rules and fix patterns for 10 common Spark anti-patterns |
+| Databricks Optimizations | `references/databricks-optimizations.md` | Databricks-specific config audit checklist (AQE, Photon, Delta, DPP) |
+| Report Template | `references/report-template.md` | Markdown template for the Performance Tuning Report output |
+| Spark Metrics Reference | `references/spark-metrics-reference.md` | Operator-level metric definitions, units, and diagnostic patterns |
+| Event Log Parser | `scripts/parse_eventlog.py` | Zero-dependency Python script to parse Spark event logs into structured QPL JSON |
+| HTML QPL Parser | `scripts/parse_qpl.py` | Parses Spark UI HTML pages into structured QPL JSON (requires beautifulsoup4) |
 
 ---
 
