@@ -1,0 +1,44 @@
+{
+  "name": "My Spark Job",
+  "description": "Replace with your job description.",
+  "tags": {
+    "project": "my-project",
+    "owner": "your.name"
+  },
+  "tasks": [
+    {
+      "task_key": "main_task",
+      "description": "Replace with your task description",
+      "notebook_task": {
+        "notebook_path": "/Users/you@example.com/my-project/my_notebook",
+        "source": "WORKSPACE"
+      },
+      "new_cluster": {
+        "spark_version": "16.2.x-scala2.12",
+        "num_workers": 2,
+        "node_type_id": "Standard_D4ds_v5",
+        "data_security_mode": "SINGLE_USER",
+        "spark_conf": {
+          "spark.sql.adaptive.enabled": "true",
+          "spark.sql.adaptive.skewJoin.enabled": "true",
+          "spark.sql.adaptive.coalescePartitions.enabled": "true",
+          "spark.databricks.delta.optimizeWrite.enabled": "true",
+          "spark.databricks.delta.autoCompact.enabled": "true",
+          "spark.sql.shuffle.partitions": "auto"
+        },
+        "runtime_engine": "PHOTON",
+        "cluster_log_conf": {
+          "volumes": {
+            "destination": "/Volumes/my_catalog/my_schema/cluster_logs"
+          }
+        }
+      },
+      "timeout_seconds": 1800
+    }
+  ],
+  "queue": {
+    "enabled": true
+  },
+  "max_concurrent_runs": 1,
+  "format": "MULTI_TASK"
+}
