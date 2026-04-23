@@ -1,0 +1,15 @@
+{
+  "name": "spark-tune",
+  "version": "1.0.0",
+  "description": "Analyze Spark execution logs from Databricks jobs, extract query plans and stage metrics, and generate prioritized performance tuning recommendations.",
+  "author": "Kishore Mannava",
+  "skills": [
+    {
+      "name": "spark-tune",
+      "path": "skills/spark-tune",
+      "description": "Analyze Spark logs and generate a performance tuning report with actionable recommendations."
+    }
+  ],
+  "connectors": [],
+  "tags": ["spark", "databricks", "performance", "tuning", "optimization"]
+}
